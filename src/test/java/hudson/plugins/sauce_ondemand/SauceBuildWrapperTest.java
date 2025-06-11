@@ -12,7 +12,7 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
 import com.cloudbees.plugins.credentials.SystemCredentialsProvider;
-import com.saucelabs.ci.sauceconnect.SauceConnectFourManager;
+import com.saucelabs.ci.sauceconnect.SauceConnectManager;
 import com.saucelabs.jenkins.HudsonSauceManagerFactory;
 import com.saucelabs.saucerest.DataCenter;
 import com.saucelabs.saucerest.JobSource;
@@ -81,11 +81,12 @@ public class SauceBuildWrapperTest {
     this.credentialsId =
         SauceCredentials.migrateToCredentials("fakeuser", "fakekey", null, "unittest");
 
-    JenkinsSauceREST sauceRest = new JenkinsSauceREST("username", "access key", DataCenter.US_WEST);
+    JenkinsSauceREST sauceRest = new JenkinsSauceREST("username", "access key", DataCenter.US_WEST, null);
     PluginImpl plugin = PluginImpl.get();
     assertNotNull(plugin);
     // Reset connection string every run
     plugin.setSauceConnectOptions("");
+    plugin.setSauceConnectCLIOptions("");
     plugin.setDisableUsageStats(true);
 
     JobsEndpoint mockJobsEndpoint = mock(JobsEndpoint.class);
@@ -116,8 +117,8 @@ public class SauceBuildWrapperTest {
 
     // store dummy implementations of Sauce Connect manager
 
-    SauceConnectFourManager sauceConnectFourManager =
-        new SauceConnectFourManager() {
+    SauceConnectManager sauceConnectManager =
+        new SauceConnectManager() {
           @Override
           public Process openConnection(
               String username,
@@ -128,11 +129,12 @@ public class SauceBuildWrapperTest {
               String options,
               PrintStream printStream,
               Boolean verboseLogging,
-              String sauceConnectPath) {
+              String sauceConnectPath,
+              boolean legacyCLI) {
             return null;
           }
         };
-    storeDummyManager(sauceConnectFourManager);
+    storeDummyManager(sauceConnectManager);
 
     EnvironmentVariablesNodeProperty prop = new EnvironmentVariablesNodeProperty();
     EnvVars envVars = prop.getEnvVars();
@@ -145,18 +147,18 @@ public class SauceBuildWrapperTest {
     storeDummyManager(null);
   }
 
-  private void storeDummyManager(SauceConnectFourManager sauceConnectFourManager) throws Exception {
+  private void storeDummyManager(SauceConnectManager sauceConnectManager) throws Exception {
     HudsonSauceManagerFactory factory = HudsonSauceManagerFactory.getInstance();
-    Field field = HudsonSauceManagerFactory.class.getDeclaredField("sauceConnectFourManager");
+    Field field = HudsonSauceManagerFactory.class.getDeclaredField("sauceConnectManager");
     field.setAccessible(true);
-    field.set(factory, sauceConnectFourManager);
+    field.set(factory, sauceConnectManager);
   }
 
   /** Verifies that environment variables are resolved for the Sauce Connect options. */
   @Test
   public void resolveVariables() throws Exception {
-    SauceConnectFourManager sauceConnectFourManager =
-        new SauceConnectFourManager() {
+    SauceConnectManager sauceConnectManager =
+        new SauceConnectManager() {
           @Override
           public Process openConnection(
               String username,
@@ -167,17 +169,18 @@ public class SauceBuildWrapperTest {
               String options,
               PrintStream printStream,
               Boolean verboseLogging,
-              String sauceConnectPath) {
+              String sauceConnectPath,
+              boolean legacyCLI) {
             assertEquals(
                 "Variable not resolved",
-                "-i 1 -x https://saucelabs.com/rest/v1",
+                "-i 1 --region us-west",
                 options); // null reverts to default US_WEST
             return null;
           }
         };
-    storeDummyManager(sauceConnectFourManager);
+    storeDummyManager(sauceConnectManager);
     SauceOnDemandBuildWrapper sauceBuildWrapper = new TestSauceOnDemandBuildWrapper(credentialsId);
-    sauceBuildWrapper.setOptions("-i ${BUILD_NUMBER}");
+    sauceBuildWrapper.setCliOptions("-i ${BUILD_NUMBER}");
 
     FreeStyleBuild build = runFreestyleBuild(sauceBuildWrapper, null, "resolveVariables");
     jenkinsRule.assertBuildStatusSuccess(build);
@@ -186,8 +189,8 @@ public class SauceBuildWrapperTest {
   /** Verifies that common options are set when the build is run. */
   @Test
   public void commonOptions() throws Exception {
-    SauceConnectFourManager sauceConnectFourManager =
-        new SauceConnectFourManager() {
+    SauceConnectManager sauceConnectManager =
+        new SauceConnectManager() {
           @Override
           public Process openConnection(
               String username,
@@ -198,20 +201,21 @@ public class SauceBuildWrapperTest {
               String options,
               PrintStream printStream,
               Boolean verboseLogging,
-              String sauceConnectPath) {
+              String sauceConnectPath,
+              boolean legacyCLI) {
             assertEquals(
                 "Variables are resolved correctly",
                 options,
-                "-i 1 -x https://saucelabs.com/rest/v1"); // null reverts to default US
+                "-i 1 --region us-west"); // null reverts to default US
             return null;
           }
         };
-    storeDummyManager(sauceConnectFourManager);
+    storeDummyManager(sauceConnectManager);
     SauceOnDemandBuildWrapper sauceBuildWrapper = new TestSauceOnDemandBuildWrapper(credentialsId);
     PluginImpl plugin = PluginImpl.get();
     assertNotNull(plugin);
-    plugin.setSauceConnectOptions("-i ${BUILD_NUMBER}");
-    sauceBuildWrapper.setOptions("");
+    plugin.setSauceConnectCLIOptions("-i ${BUILD_NUMBER}");
+    sauceBuildWrapper.setCliOptions("");
 
     FreeStyleBuild build = runFreestyleBuild(sauceBuildWrapper, null, "commonOptions");
     jenkinsRule.assertBuildStatusSuccess(build);
@@ -220,8 +224,8 @@ public class SauceBuildWrapperTest {
   /** Verifies that the options should be common/admin => build => generated */
   @Test
   public void resolvedOptionsOrder() throws Exception {
-    SauceConnectFourManager sauceConnectFourManager =
-        new SauceConnectFourManager() {
+    SauceConnectManager sauceConnectManager =
+        new SauceConnectManager() {
           @Override
           public Process openConnection(
               String username,
@@ -232,7 +236,8 @@ public class SauceBuildWrapperTest {
               String options,
               PrintStream printStream,
               Boolean verboseLogging,
-              String sauceConnectPath) {
+              String sauceConnectPath,
+              boolean legacyCLI) {
             // Match that it starts with tunnel-name, because timestamp
             assertThat(
                 "Variables are resolved correctly",
@@ -242,12 +247,12 @@ public class SauceBuildWrapperTest {
             return null;
           }
         };
-    storeDummyManager(sauceConnectFourManager);
+    storeDummyManager(sauceConnectManager);
     SauceOnDemandBuildWrapper sauceBuildWrapper = new TestSauceOnDemandBuildWrapper(credentialsId);
     PluginImpl plugin = PluginImpl.get();
     assertNotNull(plugin);
-    plugin.setSauceConnectOptions("--global");
-    sauceBuildWrapper.setOptions("--build -i 1");
+    plugin.setSauceConnectCLIOptions("--global");
+    sauceBuildWrapper.setCliOptions("--build -i 1");
     sauceBuildWrapper.setUseGeneratedTunnelIdentifier(true);
 
     FreeStyleBuild build = runFreestyleBuild(sauceBuildWrapper, null, "resolvedOptionsOrder");
@@ -257,8 +262,8 @@ public class SauceBuildWrapperTest {
   /** Simulates the handling of a Sauce Connect time out. */
   @Test
   public void sauceConnectTimeOut() throws Exception {
-    SauceConnectFourManager sauceConnectFourManager =
-        new SauceConnectFourManager() {
+    SauceConnectManager sauceConnectManager =
+        new SauceConnectManager() {
           @Override
           public Process openConnection(
               String username,
@@ -269,12 +274,13 @@ public class SauceBuildWrapperTest {
               String options,
               PrintStream printStream,
               Boolean verboseLogging,
-              String sauceConnectPath)
+              String sauceConnectPath,
+              boolean legacyCLI)
               throws SauceConnectException {
             throw new SauceConnectDidNotStartException("Sauce Connect failed to start");
           }
         };
-    storeDummyManager(sauceConnectFourManager);
+    storeDummyManager(sauceConnectManager);
     SauceOnDemandBuildWrapper sauceBuildWrapper = new TestSauceOnDemandBuildWrapper(credentialsId);
 
     FreeStyleBuild build = runFreestyleBuild(sauceBuildWrapper, null, "sauceConnectTimeOut");
@@ -308,8 +314,8 @@ public class SauceBuildWrapperTest {
     sauceBuildWrapper.setUseGeneratedTunnelIdentifier(true);
 
     final JSONObject holder = new JSONObject();
-    SauceConnectFourManager sauceConnectFourManager =
-        new SauceConnectFourManager() {
+    SauceConnectManager sauceConnectManager =
+        new SauceConnectManager() {
           @Override
           public Process openConnection(
               String username,
@@ -320,13 +326,14 @@ public class SauceBuildWrapperTest {
               String options,
               PrintStream printStream,
               Boolean verboseLogging,
-              String sauceConnectPath) {
+              String sauceConnectPath,
+              boolean legacyCLI) {
             holder.element("scProvidedPort", port);
             return null;
           }
         };
 
-    storeDummyManager(sauceConnectFourManager);
+    storeDummyManager(sauceConnectManager);
     SauceBuilder sauceBuilder =
         new SauceBuilder() {
           @Override
@@ -367,8 +374,8 @@ public class SauceBuildWrapperTest {
     sauceBuildWrapper.setSeleniumPort("$TEST_PORT_VARIABLE_4321");
 
     final JSONObject holder = new JSONObject();
-    SauceConnectFourManager sauceConnectFourManager =
-        new SauceConnectFourManager() {
+    SauceConnectManager sauceConnectManager =
+        new SauceConnectManager() {
           @Override
           public Process openConnection(
               String username,
@@ -379,13 +386,14 @@ public class SauceBuildWrapperTest {
               String options,
               PrintStream printStream,
               Boolean verboseLogging,
-              String sauceConnectPath) {
+              String sauceConnectPath,
+              boolean legacyCLI) {
             holder.element("scProvidedPort", Integer.toString(port, 10));
             return null;
           }
         };
 
-    storeDummyManager(sauceConnectFourManager);
+    storeDummyManager(sauceConnectManager);
     SauceBuilder sauceBuilder =
         new SauceBuilder() {
           @Override

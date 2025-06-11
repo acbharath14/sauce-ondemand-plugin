@@ -27,7 +27,7 @@ import com.cloudbees.plugins.credentials.CredentialsProvider;
 import com.cloudbees.plugins.credentials.common.StandardUsernameListBoxModel;
 import com.saucelabs.ci.Browser;
 import com.saucelabs.ci.sauceconnect.AbstractSauceTunnelManager;
-import com.saucelabs.jenkins.HudsonSauceConnectFourManager;
+import com.saucelabs.jenkins.HudsonSauceConnectManager;
 import com.saucelabs.jenkins.HudsonSauceManagerFactory;
 import com.saucelabs.saucerest.DataCenter;
 import com.saucelabs.saucerest.SauceException;
@@ -37,6 +37,7 @@ import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import hudson.EnvVars;
 import hudson.Extension;
 import hudson.Launcher;
+import hudson.ProxyConfiguration;
 import hudson.Util;
 import hudson.model.AbstractBuild;
 import hudson.model.AbstractProject;
@@ -190,6 +191,14 @@ public class SauceOnDemandBuildWrapper extends BuildWrapper implements Serializa
   /** Indicates whether Sauce Connect should be started as part of the build. */
   private boolean enableSauceConnect;
 
+  private static Map<String, String> endpointToRegion = Map.of(
+          "https://saucelabs.com/", "us-west",
+          "https://eu-central-1.saucelabs.com/", "eu-central",
+          "https://us-east-4.saucelabs.com/", "us-east",
+          // Deprecated endpoint but it hasn't been removed from Sauce Credentials yet
+          "https://us-east-1.saucelabs.com/", "us-east"
+  );
+
   /** Host location of the selenium server. */
   private String seleniumHost;
 
@@ -233,6 +242,8 @@ public class SauceOnDemandBuildWrapper extends BuildWrapper implements Serializa
 
   /** The Sauce Connect command line options to be used. */
   private String options;
+
+  private String cliOptions;
 
   /** Default verbose logging to true. */
   private boolean verboseLogging = true;
@@ -283,6 +294,7 @@ public class SauceOnDemandBuildWrapper extends BuildWrapper implements Serializa
       String seleniumHost,
       String seleniumPort,
       String options,
+      String cliOptions,
       String sauceConnectPath,
       boolean launchSauceConnectOnSlave,
       boolean verboseLogging,
@@ -298,6 +310,7 @@ public class SauceOnDemandBuildWrapper extends BuildWrapper implements Serializa
     this.seleniumHost = seleniumHost;
     this.seleniumPort = seleniumPort;
     this.options = options;
+    this.cliOptions = cliOptions;
     this.webDriverBrowsers = webDriverBrowsers;
     this.appiumBrowsers = appiumBrowsers;
     if (seleniumInformation != null) {
@@ -339,7 +352,7 @@ public class SauceOnDemandBuildWrapper extends BuildWrapper implements Serializa
    * @throws ComponentLookupException see plexus
    */
   public static AbstractSauceTunnelManager getSauceTunnelManager() throws ComponentLookupException {
-    return HudsonSauceManagerFactory.getInstance().createSauceConnectFourManager();
+    return HudsonSauceManagerFactory.getInstance().createSauceConnectManager();
   }
 
   @Override
@@ -380,18 +393,31 @@ public class SauceOnDemandBuildWrapper extends BuildWrapper implements Serializa
     if (isEnableSauceConnect()) {
 
       boolean canRun = true;
+      boolean legacyCLI = false;
       String workingDirectory = p != null ? p.getSauceConnectDirectory() : null;
       String maxRetries = p != null ? p.getSauceConnectMaxRetries() : null;
       String retryWaitTime = p != null ? p.getSauceConnectRetryWaitTime() : null;
-      String resolvedOptions = getCommandLineOptions(build, listener);
+      String resolvedLegacyOptions = getLegacyCommandLineOptions(build, listener).strip();
+      String resolvedOptions = getCommandLineOptions(build, listener).strip();
+      String options = resolvedOptions;
+
+      if (!resolvedLegacyOptions.isEmpty() && !resolvedOptions.isEmpty()) {
+        throw new IOException("Legacy and modern CLI options both specified");
+      }
+
+      if (!resolvedLegacyOptions.isEmpty()) {
+          legacyCLI = true;
+          options = resolvedLegacyOptions;
+          listener.getLogger().println("WARNING: legacy options set: " + resolvedLegacyOptions);
+      }
 
       if (isUseGeneratedTunnelIdentifier()) {
         build.getBuildVariables().put(TUNNEL_NAME, tunnelName);
-        resolvedOptions = resolvedOptions + " --tunnel-name " + tunnelName;
+        options = options + " --tunnel-name " + tunnelName;
       }
 
       build.getBuildVariables().put(SAUCE_REST_ENDPOINT, restEndpoint);
-      resolvedOptions = resolvedOptions + " -x " + restEndpoint + "rest/v1";
+      options = options + " --region " + this.endpointToRegion.get(restEndpoint);
 
       try {
         if (condition != null) {
@@ -422,13 +448,16 @@ public class SauceOnDemandBuildWrapper extends BuildWrapper implements Serializa
                 listener,
                 workingDirectory,
                 useLatestSauceConnect,
-                resolvedOptions,
+                legacyCLI,
+                options,
                 null,
                 username,
                 credentials.getApiKey().getPlainText(),
                 dc,
                 maxRetries,
-                retryWaitTime);
+                retryWaitTime,
+                Jenkins.get().getProxy()
+            );
 
         if (launchSauceConnectOnSlave) {
           listener
@@ -684,7 +713,7 @@ public class SauceOnDemandBuildWrapper extends BuildWrapper implements Serializa
               SauceCredentials.getSauceCredentials(
                   build, SauceOnDemandBuildWrapper.this); // get credentials
           JenkinsSauceREST sauceREST =
-              credentials.getSauceREST(); // use credentials to get sauceRest
+              credentials.getSauceREST(Jenkins.get().getProxy()); // use credentials to get sauceRest
           SauceConnectEndpoint ep = sauceREST.getSauceConnectEndpoint();
 
           if (isEnableSauceConnect() && isUseGeneratedTunnelIdentifier()) {
@@ -779,7 +808,7 @@ public class SauceOnDemandBuildWrapper extends BuildWrapper implements Serializa
    * @throws IOException
    * @throws InterruptedException
    */
-  private String getCommandLineOptions(AbstractBuild build, BuildListener listener)
+  private String getLegacyCommandLineOptions(AbstractBuild build, BuildListener listener)
       throws IOException, InterruptedException {
     PluginImpl p = PluginImpl.get();
 
@@ -787,6 +816,30 @@ public class SauceOnDemandBuildWrapper extends BuildWrapper implements Serializa
     resolvedOptions.add(
         getResolvedOptions(build, listener, p != null ? p.getSauceConnectOptions() : null));
     resolvedOptions.add(getResolvedOptions(build, listener, options));
+    resolvedOptions.removeAll(Collections.singleton("")); // remove the empty strings
+    return StringUtils.join(resolvedOptions, " ");
+  }
+
+  /**
+   * Returns the command line options to be used as part of Sauce Connect. Any variable references
+   * contained in the options specified within the Jenkins job configuration are resolved, and if
+   * common options are specified then these are appended to the list of options.
+   *
+   * @param build The build in progress for which an {@link Environment} object is created. Never
+   *     null.
+   * @param listener Can be used to send any message.
+   * @return String representing the Sauce Connect command line options
+   * @throws IOException
+   * @throws InterruptedException
+   */
+  private String getCommandLineOptions(AbstractBuild build, BuildListener listener)
+      throws IOException, InterruptedException {
+    PluginImpl p = PluginImpl.get();
+
+    ArrayList<String> resolvedOptions = new ArrayList<String>();
+    resolvedOptions.add(
+        getResolvedOptions(build, listener, p != null ? p.getSauceConnectCLIOptions() : null));
+    resolvedOptions.add(getResolvedOptions(build, listener, cliOptions));
     resolvedOptions.removeAll(Collections.singleton("")); // remove the empty strings
     return StringUtils.join(resolvedOptions, " ");
   }
@@ -922,10 +975,6 @@ public class SauceOnDemandBuildWrapper extends BuildWrapper implements Serializa
     return useLatestSauceConnect;
   }
 
-  public void setUseLatestSauceConnect(boolean useLatestSauceConnect) {
-    this.useLatestSauceConnect = useLatestSauceConnect;
-  }
-
   public boolean isUseGeneratedTunnelIdentifier() {
     return useGeneratedTunnelIdentifier;
   }
@@ -948,6 +997,14 @@ public class SauceOnDemandBuildWrapper extends BuildWrapper implements Serializa
 
   public void setOptions(String options) {
     this.options = options;
+  }
+
+  public String getCliOptions() {
+    return cliOptions;
+  }
+
+  public void setCliOptions(String cliOptions) {
+    this.cliOptions = cliOptions;
   }
 
   public RunCondition getCondition() {
@@ -1098,12 +1155,14 @@ public class SauceOnDemandBuildWrapper extends BuildWrapper implements Serializa
       extends MasterToSlaveCallable<
           SauceConnectHandler, AbstractSauceTunnelManager.SauceConnectException> {
     private final String options;
+    private final boolean legacyCLI;
     private final String workingDirectory;
     private final boolean useLatestSauceConnect;
     private final String username;
     private final String key;
     private final DataCenter dataCenter;
-    private final BuildListener listener;
+      private final ProxyConfiguration proxy;
+      private final BuildListener listener;
     private final boolean verboseLogging;
     private final String sauceConnectPath;
     private int maxRetries;
@@ -1117,21 +1176,25 @@ public class SauceOnDemandBuildWrapper extends BuildWrapper implements Serializa
         BuildListener listener,
         String workingDirectory,
         boolean useLatestSauceConnect,
+        boolean legacyCLI,
         String resolvedOptions,
         File sauceConnectJar,
         String username,
         String apiKey,
         DataCenter dataCenter,
         String maxRetries,
-        String retryWaitTime) {
+        String retryWaitTime,
+        ProxyConfiguration proxy) {
       this.options = resolvedOptions;
       this.workingDirectory = workingDirectory;
       this.useLatestSauceConnect = useLatestSauceConnect;
+      this.legacyCLI = legacyCLI;
       this.listener = listener;
       this.username = username;
       this.key = apiKey;
       this.dataCenter = dataCenter;
-      this.port = sauceOnDemandBuildWrapper.getPort(env);
+        this.proxy = proxy;
+        this.port = sauceOnDemandBuildWrapper.getPort(env);
       this.verboseLogging = sauceOnDemandBuildWrapper.isVerboseLogging();
       this.sauceConnectPath = sauceOnDemandBuildWrapper.getSauceConnectPath();
       this.sauceConnectJar = sauceConnectJar;
@@ -1164,14 +1227,14 @@ public class SauceOnDemandBuildWrapper extends BuildWrapper implements Serializa
       try {
         listener.getLogger().println("Launching Sauce Connect on " + getCurrentHostName());
         sauceTunnelManager = getSauceTunnelManager();
-        if (sauceTunnelManager instanceof HudsonSauceConnectFourManager
+        if (sauceTunnelManager instanceof HudsonSauceConnectManager
             && workingDirectory != null) {
-          ((HudsonSauceConnectFourManager) sauceTunnelManager)
+          ((HudsonSauceConnectManager) sauceTunnelManager)
               .setWorkingDirectory(workingDirectory);
-          ((HudsonSauceConnectFourManager) sauceTunnelManager)
+          ((HudsonSauceConnectManager) sauceTunnelManager)
               .setUseLatestSauceConnect(useLatestSauceConnect);
         }
-        sauceTunnelManager.setSauceRest(new JenkinsSauceREST(username, key, dataCenter));
+        sauceTunnelManager.setSauceRest(new JenkinsSauceREST(username, key, dataCenter, proxy));
         if (StringUtils.isBlank(username)) {
           listener.getLogger().println("Username not set, not starting Sauce Connect");
         } else if (StringUtils.isBlank(key)) {
@@ -1196,7 +1259,8 @@ public class SauceOnDemandBuildWrapper extends BuildWrapper implements Serializa
                 options,
                 listener.getLogger(),
                 verboseLogging,
-                sauceConnectPath);
+                sauceConnectPath,
+                legacyCLI);
             return this;
           } catch (AbstractSauceTunnelManager.SauceConnectDidNotStartException e) {
             retryCount++;
@@ -1227,7 +1291,8 @@ public class SauceOnDemandBuildWrapper extends BuildWrapper implements Serializa
             options,
             listener.getLogger(),
             verboseLogging,
-            sauceConnectPath);
+            sauceConnectPath,
+            legacyCLI);
       }
       return this;
     }
@@ -1299,7 +1364,7 @@ public class SauceOnDemandBuildWrapper extends BuildWrapper implements Serializa
      * @return Sauce Connect version
      */
     public String getSauceConnectVersion() {
-      return HudsonSauceConnectFourManager.CURRENT_SC_VERSION;
+      return HudsonSauceConnectManager.CURRENT_SC_VERSION;
     }
 
     /**

@@ -4,7 +4,7 @@ import static org.mockito.ArgumentMatchers.isNull;
 
 import com.auth0.jwt.JWT;
 import com.auth0.jwt.algorithms.Algorithm;
-import com.saucelabs.ci.sauceconnect.SauceConnectFourManager;
+import com.saucelabs.ci.sauceconnect.SauceConnectManager;
 import com.saucelabs.jenkins.HudsonSauceManagerFactory;
 import com.saucelabs.saucerest.DataCenter;
 
@@ -35,11 +35,11 @@ public class SauceStepTest {
     }
   }
 
-  private void storeDummyManager(SauceConnectFourManager sauceConnectFourManager) throws Exception {
+  private void storeDummyManager(SauceConnectManager sauceConnectManager) throws Exception {
     HudsonSauceManagerFactory factory = HudsonSauceManagerFactory.getInstance();
-    Field field = HudsonSauceManagerFactory.class.getDeclaredField("sauceConnectFourManager");
+    Field field = HudsonSauceManagerFactory.class.getDeclaredField("sauceConnectManager");
     field.setAccessible(true);
-    field.set(factory, sauceConnectFourManager);
+    field.set(factory, sauceConnectManager);
   }
 
   @Test
@@ -96,13 +96,13 @@ public class SauceStepTest {
     String credentialsId =
         SauceCredentials.migrateToCredentials("fakeuser", "fakekey", null, "unittest");
 
-    SauceConnectFourManager sauceConnectFourManager = Mockito.mock(SauceConnectFourManager.class);
+    SauceConnectManager sauceConnectManager = Mockito.mock(SauceConnectManager.class);
 
-    storeDummyManager(sauceConnectFourManager);
+    storeDummyManager(sauceConnectManager);
 
     // stubbing appears before the actual execution
     Mockito.when(
-            sauceConnectFourManager.openConnection(
+            sauceConnectManager.openConnection(
                 Mockito.anyString(),
                 Mockito.anyString(),
                 Mockito.any(DataCenter.class),
@@ -111,7 +111,8 @@ public class SauceStepTest {
                 Mockito.anyString(),
                 Mockito.any(PrintStream.class),
                 Mockito.eq(true),
-                Mockito.anyString()))
+                Mockito.anyString(),
+                Mockito.eq(true)))
         .thenReturn(null);
     PluginImpl.get().setSauceConnectOptions("-i gavin -vv");
 
@@ -131,18 +132,19 @@ public class SauceStepTest {
     r.assertLogContains("USERNAME=fakeuser", run);
     r.assertLogContains("ACCESS_KEY=fakekey", run);
 
-    Mockito.verify(sauceConnectFourManager)
+    Mockito.verify(sauceConnectManager)
         .openConnection(
             Mockito.eq("fakeuser"),
             Mockito.eq("fakekey"),
-            Mockito.eq("US_WEST"),
+            Mockito.any(DataCenter.class),
             Mockito.anyInt(),
             isNull(),
             Mockito.matches(
-                "-i gavin -vv -i tunnel-name --tunnel-name [a-zA-Z0-9_-]+ -x https://saucelabs.com/rest/v1"),
+                "-i gavin -vv -i tunnel-name --tunnel-name [a-zA-Z0-9_-]+ --region us-west"),
             Mockito.any(PrintStream.class),
             Mockito.eq(true),
-            isNull());
+            isNull(),
+            Mockito.eq(true));
   }
 
   @Test
@@ -159,7 +161,7 @@ public class SauceStepTest {
     WorkflowRun run = p.scheduleBuild2(0).get();
     r.assertBuildStatus(Result.FAILURE, run);
     r.assertLogContains(
-        "Perhaps you forgot to surround the code with a step that provides this, such as: sauce",
+        "Perhaps you forgot to surround the sauceconnect step with a step that provides this, such as: sauce",
         run);
   }
 }
